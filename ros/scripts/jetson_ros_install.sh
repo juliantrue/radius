@@ -40,13 +40,13 @@ echo "${green}Installing ROS Kinetic...${reset}"
 sudo sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list'
 
 # Set up your keys
-sudo apt-key adv --keyserver hkp://ha.pool.sks-keyservers.net:80 --recv-key 0xB01FA116
+sudo apt-key adv --keyserver hkp://ha.pool.sks-keyservers.net:80 --recv-key 421C365BD9FF1F717815A3895523BAEEB01FA116
 
 # Update package index
 sudo apt-get update
 
 # Install ROS base and MAVROS packages
-sudo apt-get install -y ros-kinetic-ros-base ros-kinetic-mavros ros-kinetic-mavros-extras
+sudo apt-get install -y ros-kinetic-ros-base ros-kinetic-mavros ros-kinetic-mavros-extras ros-kinetic-cv-bridge
 
 # For some reason, SSL certificates get messed up on TX1 so Python scripts like rosdep will fail. Rehash the certs.
 sudo c_rehash /etc/ssl/certs
@@ -64,7 +64,7 @@ source /opt/ros/kinetic/setup.bash
 
 # Install GStreamer plugins (needed for H.264 encoding etc).
 echo "${green}Installing GStreamer plugins...${reset}"
-sudo apt-get install -y gstreamer1.0-plugins-bad
+sudo apt-get install -y gstreamer1.0-plugins-base gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-good gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-good1.0-dev libyaml-cpp-dev v4l-utils 
 
 # install libwebcam command line tool, and disable autofocus and autoexposure
 sudo apt-get install -y uvcdynctrl
@@ -112,22 +112,25 @@ cd $CATKIN_WS
 catkin_make -DGSTREAMER_VERSION_1_x=On
 
 # Installing redtail ROS packages and dependencies.
-echo "${green}Starting installation of caffe_ros and px4_controller ROS packages...${reset}"
+echo "${green}Starting installation of radius ROS packages...${reset}"
 cd $HOME
-if [ ! -d "$HOME/redtail" ]; then
-    echo "Cloning redtail sources..."
-    git clone https://github.com/NVIDIA-Jetson/redtail
+if [ ! -d "$HOME/radius" ]; then
+    echo "Cloning radius sources..."
+    git clone https://github.com/juliantrue/radius
 else
-    echo "Updating redtail sources..."
-    cd redtail
+    echo "Updating radius sources..."
+    cd radius
     git checkout master
     git pull
 fi
 
-if [ ! -L "$CATKIN_WS/src/caffe_ros" ]; then
+if [ ! -L "$CATKIN_WS/src/mrcnn" ]; then
     # Create symlinks to catkin workspace.
-    ln -s $HOME/redtail/ros/packages/caffe_ros $CATKIN_WS/src/
-    ln -s $HOME/redtail/ros/packages/px4_controller $CATKIN_WS/src/
+    ln -s $HOME/radius/ros/packages/caffe_ros $CATKIN_WS/src/
+    ln -s $HOME/radius/ros/packages/px4_controller $CATKIN_WS/src/
+    ln -s $HOME/radius/ros/packages/mrcnn $CATKIN_WS/src/
+    ln -s $HOME/radius/ros/packages/lndng_controller $CATKIN_WS/src/
+    ln -s $HOME/radius/ros/packages/radius_debug $CATKIN_WS/src/
 fi
 
 echo "Installing dependencies..."
@@ -139,6 +142,15 @@ echo "Building caffe_ros package..."
 catkin_make caffe_ros_node
 echo "Building px4_controller package..."
 catkin_make px4_controller_node
+echo "Building Mask RCNN package..."
+catkin_make mrcnn 
+chmod +x $CATKIN_WS/src/mrcnn/src/mrcnn_node.py
+echo "Building Landing Controller package..."
+catkin_make lndng_controller 
+chmod +x $CATKIN_WS/src/lndng_controller/src/lndng_controller_node.py
+echo "Building debugging package..."
+catkin_make radius_debug
+chmod +x $CATKIN_WS/src/radius_debug/src/radius_debug.py
 
 # Environment setup.
 echo "source $CATKIN_WS/devel/setup.bash" >> $HOME/.bashrc

@@ -258,21 +258,28 @@ void PX4Controller::dnnCallback(const sensor_msgs::Image::ConstPtr& msg)
     }
 
     const float* probs = (const float*)(msg->data.data());
-    float class_probabilities[6] = { probs[0], probs[1], probs[2], 0.0f, 1.0f, 0.0f };
+    //float class_probabilities[6] = { probs[0], probs[1], probs[2], 0.0f, 1.0f, 0.0f };
+    //                           lin_ctrl_val, ang_ctrl_val, yaw_ctrl_val, alt_ctrl_val
+    //float class_probabilities[6] = { probs[0], probs[1], probs[2], probs[3], probs[4], probs[5] };
+    dnn_linear_control_val_ = probs[0];
+    dnn_angular_control_val_ = probs[1];
+    dnn_yaw_control_val_ = probs[2];
+    dnn_altitude_control_val_ = probs[3];
 
-    if(dnn_class_count_ == 6)
-    {
-        class_probabilities[3] = probs[3];
-        class_probabilities[4] = probs[4];
-        class_probabilities[5] = probs[5];
-    }
-    ROS_INFO("DNN state/message: on=%d, %4.2f, %4.2f, %4.2f, %4.2f, %4.2f, %4.2f", (int)use_dnn_data_,
-             class_probabilities[0], class_probabilities[1], class_probabilities[2],
-             class_probabilities[3], class_probabilities[4], class_probabilities[5]);
+    //if(dnn_class_count_ == 6)
+    //{
+    //    class_probabilities[3] = probs[3];
+    //    class_probabilities[4] = probs[4];
+    //    class_probabilities[5] = probs[5];
+    //}
+    //ROS_INFO("DNN state/message: on=%d, %4.2f, %4.2f, %4.2f, %4.2f, %4.2f, %4.2f", (int)use_dnn_data_,
+    //         class_probabilities[0], class_probabilities[1], class_probabilities[2],
+    //         class_probabilities[3], class_probabilities[4], class_probabilities[5]);
 
     // If we have no joystick available OR no control input from joystick, then follow DNN directions.
-    computeDNNControl(class_probabilities, dnn_linear_control_val_, dnn_angular_control_val_);
-    ROS_DEBUG("dnn controls: linear=%f, angular=%f", dnn_linear_control_val_, dnn_angular_control_val_);
+    //computeDNNControl(class_probabilities, dnn_linear_control_val_, dnn_angular_control_val_);
+    ROS_DEBUG("dnn controls: linear=%f, angular=%f, yaw=%f, altitude=%f", dnn_linear_control_val_,
+              dnn_angular_control_val_, dnn_yaw_control_val_, dnn_altitude_control_val_ );
     timeof_last_dnn_command_ = ros::Time::now();
     got_new_dnn_command_ = true;
 }
@@ -444,7 +451,7 @@ bool PX4Controller::parseArguments(const ros::NodeHandle& nh)
         ROS_ERROR("Object detection probability limit must be in 0..1 range or set to -1 to disable!");
         return false;
     }
-    
+
     ROS_INFO("ROS spin rate                 : %.1f Hz", spin_rate_);
     ROS_INFO("Vehicle type                  : %s", vehicle_type.c_str());
     ROS_INFO("Joystick type                 : %s", joy_type.c_str());
@@ -725,7 +732,7 @@ void PX4Controller::spin()
 
         bool has_command = false;
 
-        // Get latest state and control inputs. 
+        // Get latest state and control inputs.
         current_pose = current_pose_; // current_pose_ is updated elsewhere, use its fixed time value for computations
 
         switch (controller_state_)
@@ -795,6 +802,8 @@ void PX4Controller::spin()
                 {
                     linear_control_val   = dnn_linear_control_val_;
                     angular_control_val  = dnn_angular_control_val_;
+                    yaw_control_val      = dnn_yaw_control_val_;
+                    altitude_control_val = dnn_altitude_control_val_;
                     got_new_dnn_command_ = false;
                     dnn_commands_count_++;
                 }

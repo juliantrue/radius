@@ -15,19 +15,26 @@ import cv2
 class Lander(object):
     def __init__(self, control_img):
         self._control_mask = control_img
-        self._controller = self.PID(4.0,0.001,0.001,0.001)
+        self._cmd_tracker = []
+        self._CMD_TRACKER_MAX_SIZE = 16
+        self._alpha_smoothing = 1.0
+        self._controller = self.PI(4.0,0.1,0.01)
 
-    class PID(object):
-        def __init__(self, sampling_frequency, Kp, Ki, Kd):
+    class PI(object):
+        def __init__(self, sampling_frequency, Kp, Ki):
             self._sampling_frequency = sampling_frequency
             self._Kp = Kp
             self._Ki = Ki
-            self._Kd = Kd
             self._error_tracker = []
+            self._ERROR_TRACKER_MAX_SIZE = 64
 
         def compute_output(self, error):
-            self._error_tracker.append(error)
-            output = self._proportional() + self._integral() + self._derivative()
+            if len(self._error_tracker) < self._ERROR_TRACKER_MAX_SIZE:
+                self._error_tracker.append(error)
+            else:
+                self._error_tracker = self._error_tracker[1:]
+                self._error_tracker.append(error)
+            output = self._proportional() + self._integral()
             return output
 
         def _proportional(self):
@@ -39,14 +46,6 @@ class Lander(object):
             # Discrete time integral = \Sigma^t_0 error*delta_t
             integral = np.array(self._error_tracker).dot(delta_t)
             output = self._Ki * integral
-            return output
-
-        def _derivative(self):
-            # Discrete time derivative = delta_y/delta_x
-            delta_y = self._error_tracker[-1] - self._error_tracker[-2]
-            delta_t = (1/self._sampling_frequency)
-            derivative = delta_y / delta_t
-            output = self._Kp * derivative
             return output
 
     def _compute_centroid(self, mask):
@@ -92,53 +91,76 @@ class Lander(object):
     def compute_control(self, mask):
         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
         debug_img = np.zeros(mask.shape,dtype=np.uint8)
+
         # Check if mask is present in image. If not, pass
         temp = np.where(mask > 0)
         if temp[0].size == 0:
             debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
             return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), debug_img
+
         # Get center pixel of frame
         center_pixel = (int(math.floor(mask.shape[1]/2.0)),
                         int(math.floor(mask.shape[0]/2.0)))
-        # Compute centroid of detected mask
-        centroid = self._compute_centroid(mask)
+
+        centroid = self._compute_centroid(mask) # Compute centroid of detected mask
+
         # Compute manhattan distance for delta_x and delta_y in PID control
         delta_x, delta_y = self._manhattan_distance(center_pixel, centroid)
+
         # Compute the \delta theta for PID control
         delta_theta, vec, kvec, box, kbox = self._compute_rotation(self._control_mask, mask)
+
         # Create error vector \delta_x \delta_y \delta_theta and compute PID
         # output
         error = (delta_x, delta_y, delta_theta*180 / math.pi)
+        error_mag = math.sqrt(delta_x**2 + delta_y**2)
+        error_ang = math.atan2(delta_x, delta_y)
 
-        rospy.loginfo(error)
+        # Log to stdout
+        rospy.loginfo("Delta_x={.4f}, Delta_y={.4f}, Delta_theta={.4f}".format(error[0], error[1], error[2]))
 
+        # TODO: clean this block of code up.... its really gross
         debug_img = mask
         debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
-
-
         shape = debug_img.shape
-
         rows,cols = debug_img.shape[:2]
         lefty = int((-kvec[2]*kvec[1]/kvec[0]) + kvec[3])
         righty = int(((cols-kvec[2])*kvec[1]/kvec[0])+kvec[3])
         cv2.line(debug_img,(cols-1,righty),(0,lefty),(0,255,0),2)
-
         lefty = int((-vec[2]*vec[1]/vec[0]) + vec[3])
         righty = int(((cols-vec[2])*vec[1]/vec[0])+vec[3])
         cv2.line(debug_img,(cols-1,righty),(0,lefty),(0,255,0),2)
-
         cv2.drawContours(debug_img,[box],0,(0,0,255),2)
-
         cv2.circle(debug_img, centroid, 5, (0,0,255), -1)
         cv2.circle(debug_img, center_pixel, 5, (0,0,255), -1)
         cv2.line(debug_img, center_pixel, (center_pixel[0]+delta_x,
                     center_pixel[1]),(255,0,0),1)
         cv2.line(debug_img, (center_pixel[0]+delta_x,center_pixel[1]),
                     (center_pixel[0]+delta_x,center_pixel[1]+delta_y),(255,0,0),1)
-        #linear_control_val, angular_control_val = self._controller.compute_output(error)
-        #return linear_control_val, angular_control_val
 
-        return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), debug_img
+        ############ Compute control from errors ##############################
+
+        #error_mag = self._controller.compute_output(error_mag)
+        linear_control_val = error_mag*cos(error_ang)
+        angular_control_val = error_mag*sin(error_ang)
+
+        # Do Exponential smoothing on linear and angular commands
+        if len(self._cmd_tracker) > 1:
+            linear_control_val = linear_control_val*(1-self._alpha_smoothing) + self._cmd_tracker[-1]*self._alpha_smoothing
+
+        # Append commands to buffer to use in future steps
+        if len(self._cmd_tracker) <= self._CMD_TRACKER_MAX_SIZE:
+            self._cmd_tracker.append((linear_control_val, angular_control_val, yaw_control_val,
+                    altitude_control_val, 0.0, 0.0))
+        else:
+            self._cmd_tracker = self._cmd_tracker[1:]
+            self._cmd_tracker.append((linear_control_val, angular_control_val, yaw_control_val,
+                    altitude_control_val, 0.0, 0.0))
+
+        # Return the command plus the controller image visualization for debug
+        #return (linear_control_val, angular_control_val, yaw_control_val,
+        #        altitude_control_val, 0.0, 0.0), debug_img
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0), debug_img
 
 
 class Data_Handler(object):
@@ -222,19 +244,26 @@ def main():
     rospy.Subscriber("/radius/mask_rcnn/mask", Image, dh.on_img)
 
     # Publish to network output heads
-    #dh.set_command_pub(rospy.Publisher('/trails_dnn/network/output', Image,
-    #                                   queue_size=20))
+    dh.set_command_pub(rospy.Publisher('/trails_dnn/network/output', Image,
+                                       queue_size=20))
 
     dh.set_debug_visualizer_pub(rospy.Publisher('/radius/landing_controller/visualization', Image,
                                        queue_size=20))
 
-    rate = rospy.Rate(4) # Waypoint commands must be faster than 2Hz TODO: interpolate on the dnn masks
+    discount_factor = 2
+    rate = rospy.Rate(4) # Waypoint commands must be faster than 2Hz
     while not rospy.is_shutdown():
-        if(dh.data_available):
-            linear_control_val, angular_control_val, debug_img = lc.compute_control(dh.data.img)
-            dh.publish_command((linear_control_val, angular_control_val), dh.data.raw)
+        if(dh.data_available): # Mask available to determine control vectors
+            ctrl_cmd, debug_img = lc.compute_control(dh.data.img)
+            dh.publish_command(ctrl_cmd, dh.data.raw)
             dh.publish_debug_visuals(debug_img)
             dh.data_available = False
+        else: # Use previous image to send commands with discount factor
+            ctrl_cmd, debug_img = lc.compute_control(dh.data.img)
+            for i,cmd in enumerate(ctrl_cmd):
+                ctrl_cmd[i] /= discount_factor
+            dh.publish_command(ctrl_cmd, dh.data.raw)
+            dh.publish_debug_visuals(debug_img)
         rate.sleep()
 
 if __name__ == "__main__":

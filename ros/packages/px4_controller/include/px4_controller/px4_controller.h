@@ -177,6 +177,8 @@ private:
     bool  got_new_dnn_command_     = false; // whether we've got a new command from DNN
     float dnn_linear_control_val_  = 0 ;    // dnn forward control: "+" is forward and "-" is back (-1..1), updated in the DNN subsriber
     float dnn_angular_control_val_ = 0;     // dnn turn control: "+" turns left and "-" turns right (-1..1), updated in the DNN subsriber
+    float dnn_yaw_control_val_  = 0 ;    // dnn yaw control: "+" rotates in place to left and "-" rotates right (-1..1)
+    float dnn_altitude_control_val_ = 0;     // dnn alituted control: "+" is up and "-" is down (-1..1)
     ros::Time timeof_last_dnn_command_;
 
     // Object detection control

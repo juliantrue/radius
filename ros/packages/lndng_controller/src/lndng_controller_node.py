@@ -89,14 +89,14 @@ class Lander(object):
         return delta_theta, vec, kvec, box, kbox
 
     def compute_control(self, mask):
-        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+	mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
         debug_img = np.zeros(mask.shape,dtype=np.uint8)
 
         # Check if mask is present in image. If not, pass
         temp = np.where(mask > 0)
         if temp[0].size == 0:
             debug_img = cv2.cvtColor(debug_img, cv2.COLOR_GRAY2BGR)
-            return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), debug_img
+            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0), debug_img
 
         # Get center pixel of frame
         center_pixel = (int(math.floor(mask.shape[1]/2.0)),
@@ -117,7 +117,7 @@ class Lander(object):
         error_ang = math.atan2(delta_x, delta_y)
 
         # Log to stdout
-        rospy.loginfo("Delta_x={.4f}, Delta_y={.4f}, Delta_theta={.4f}".format(error[0], error[1], error[2]))
+        #rospy.loginfo("Delta_x={.4f}, Delta_y={.4f}, Delta_theta={.4f}".format(error[0], error[1], error[2]))
 
         # TODO: clean this block of code up.... its really gross
         debug_img = mask
@@ -141,14 +141,15 @@ class Lander(object):
         ############ Compute control from errors ##############################
 
         #error_mag = self._controller.compute_output(error_mag)
-        linear_control_val = error_mag*cos(error_ang)
-        angular_control_val = error_mag*sin(error_ang)
+        linear_control_val = error_mag*math.cos(error_ang)
+        angular_control_val = error_mag*math.sin(error_ang)
 
         # Do Exponential smoothing on linear and angular commands
         if len(self._cmd_tracker) > 1:
             linear_control_val = linear_control_val*(1-self._alpha_smoothing) + self._cmd_tracker[-1]*self._alpha_smoothing
 
         # Append commands to buffer to use in future steps
+	"""
         if len(self._cmd_tracker) <= self._CMD_TRACKER_MAX_SIZE:
             self._cmd_tracker.append((linear_control_val, angular_control_val, yaw_control_val,
                     altitude_control_val, 0.0, 0.0))
@@ -157,10 +158,12 @@ class Lander(object):
             self._cmd_tracker.append((linear_control_val, angular_control_val, yaw_control_val,
                     altitude_control_val, 0.0, 0.0))
 
+	"""
         # Return the command plus the controller image visualization for debug
         #return (linear_control_val, angular_control_val, yaw_control_val,
         #        altitude_control_val, 0.0, 0.0), debug_img
-        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0), debug_img
+	cmd = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return cmd, debug_img
 
 
 class Data_Handler(object):
@@ -186,8 +189,8 @@ class Data_Handler(object):
             _, cv_image = cv2.threshold(cv_image,0.9,255,cv2.THRESH_BINARY)
             cv_image = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2BGR)
             self.data.raw = img_msg
-            self.data.img = cv_image
-            self.data_available = True
+	    self.data.img = cv_image
+	    self.data_available = True
 
     def publish_command(self, cmd, input_msg):
         """
@@ -244,8 +247,8 @@ def main():
     rospy.Subscriber("/radius/mask_rcnn/mask", Image, dh.on_img)
 
     # Publish to network output heads
-    dh.set_command_pub(rospy.Publisher('/trails_dnn/network/output', Image,
-                                       queue_size=20))
+    #dh.set_command_pub(rospy.Publisher('/trails_dnn/network/output', Image,
+    #                                   queue_size=20))
 
     dh.set_debug_visualizer_pub(rospy.Publisher('/radius/landing_controller/visualization', Image,
                                        queue_size=20))
@@ -254,16 +257,18 @@ def main():
     rate = rospy.Rate(4) # Waypoint commands must be faster than 2Hz
     while not rospy.is_shutdown():
         if(dh.data_available): # Mask available to determine control vectors
-            ctrl_cmd, debug_img = lc.compute_control(dh.data.img)
-            dh.publish_command(ctrl_cmd, dh.data.raw)
+	    ctrl_cmd, debug_img = lc.compute_control(dh.data.img)
+            #dh.publish_command(ctrl_cmd, dh.data.raw)
             dh.publish_debug_visuals(debug_img)
             dh.data_available = False
+	"""
         else: # Use previous image to send commands with discount factor
-            ctrl_cmd, debug_img = lc.compute_control(dh.data.img)
+	    ctrl_cmd, debug_img = lc.compute_control(dh.data.img)
             for i,cmd in enumerate(ctrl_cmd):
                 ctrl_cmd[i] /= discount_factor
             dh.publish_command(ctrl_cmd, dh.data.raw)
             dh.publish_debug_visuals(debug_img)
+	"""
         rate.sleep()
 
 if __name__ == "__main__":

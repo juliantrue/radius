@@ -34,7 +34,8 @@ class CocoConfig(Config):
     # GPU_COUNT = 8
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 + 80 # COCO has 80 classes
+    #NUM_CLASSES = 1 + 80 # COCO has 80 classes
+    NUM_CLASSES = 1+1
 
 class InferenceConfig(CocoConfig):
     # Set batch size to 1 since we'll be running inference on
@@ -42,6 +43,7 @@ class InferenceConfig(CocoConfig):
     GPU_COUNT = 1
     IMAGES_PER_GPU = 1
     DETECTION_MIN_CONFIDENCE = 0
+    """
     class_names = ['BG', 'person', 'bicycle', 'car', 'motorcycle', 'airplane',
                'bus', 'train', 'truck', 'boat', 'traffic light',
                'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird',
@@ -57,6 +59,8 @@ class InferenceConfig(CocoConfig):
                'keyboard', 'cell phone', 'microwave', 'oven', 'toaster',
                'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors',
                'teddy bear', 'hair drier', 'toothbrush']
+    """
+    class_names = ['BG', 'elephant']
 
 class Mask_RCNN(modellib.MaskRCNN):
     # Thread safe ros implementation of the Mask RCNN architecture
@@ -134,7 +138,9 @@ class Data_Handler(object):
 def main():
     #TODO: Elevate these to arguments
     root_dir = os.getcwd()
-    model_path = os.path.join(root_dir, "src/mrcnn/src/model/mask_rcnn_coco.h5")
+    #model_path = os.path.join(root_dir, "src/mrcnn/src/model/mask_rcnn_coco.h5" 
+    model_path = os.path.join(root_dir, "src/mrcnn/src/model/mask_rcnn_radius.h5")
+
 
     # Setup config for inferencing
     RedtailConfig = InferenceConfig()

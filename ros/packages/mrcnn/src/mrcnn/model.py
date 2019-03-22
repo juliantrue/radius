@@ -7,7 +7,7 @@ Licensed under the MIT License (see LICENSE for details)
 Written by Waleed Abdulla
 """
 
-import os
+import os, time, rospy
 import random
 import datetime
 import re
@@ -25,10 +25,18 @@ import keras.models as KM
 
 from mrcnn import utils
 
-# Requires TensorFlow 1.3+ and Keras 2.0.8+.
-from distutils.version import LooseVersion
-assert LooseVersion(tf.__version__) >= LooseVersion("1.3")
-assert LooseVersion(keras.__version__) >= LooseVersion('2.0.8')
+import functools
+
+def timer(func):
+    @functools.wraps(func)
+    def wrapper_timer(*args, **kwargs):
+        start_time = time.time()
+        value = func(*args,**kwargs)
+        end_time = time.time()
+        run_time = (end_time - start_time)*10**3
+        rospy.logdebug("{} runtime: {:.4f}ms".format(func.__name__, run_time))
+        return value
+    return wrapper_timer
 
 
 ############################################################
@@ -2375,7 +2383,8 @@ class MaskRCNN(object):
             use_multiprocessing=True,
         )
         self.epoch = max(self.epoch, epochs)
-
+  
+    @timer
     def mold_inputs(self, images):
         """Takes a list of images and modifies them to the format expected
         as an input to the neural network.
@@ -2480,6 +2489,7 @@ class MaskRCNN(object):
 
         return boxes, class_ids, scores, full_masks
 
+    @timer
     def detect(self, images, verbose=0, use_TRT=False):
         """Runs the detection pipeline.
 
@@ -2520,6 +2530,7 @@ class MaskRCNN(object):
             log("molded_images", molded_images)
             log("image_metas", image_metas)
             log("anchors", anchors)
+
 
         # Run object detection
         detections, _, _, mrcnn_mask, _, _, _ =\
@@ -2597,7 +2608,8 @@ class MaskRCNN(object):
                 "masks": final_masks,
             })
         return results
-
+    
+    @timer
     def get_anchors(self, image_shape):
         """Returns anchor pyramid for the given image size."""
         backbone_shapes = compute_backbone_shapes(self.config, image_shape)

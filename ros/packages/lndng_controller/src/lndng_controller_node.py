@@ -6,13 +6,20 @@ import rospy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 # Python libs
-import sys, os, time, struct, math
-import functools
+import sys, os, datetime, time, struct, math
+import yaml
 from multiprocessing import Lock
 import numpy as np
 import cv2
 
+# Parse config file
+config_path = os.path.join(os.getcwd(), "src/lndng_controller/src/config.yml")
+with open(config_path, 'r') as ymlfile:
+    cfg = yaml.load(ymlfile)
 
+LOGDIR_PATH= os.path.join(cfg["LOGDIR"], "{}".format(datetime.datetime.now()))
+
+import functools
 def timer(func):
     @functools.wraps(func)
     def wrapper_timer(*args, **kwargs):
@@ -24,24 +31,99 @@ def timer(func):
 	return value
     return wrapper_timer
 
+def compose_debug_img(debug_img, curr_delta):
+    size = 0.5
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    h,w,_ = debug_img.shape
+    center_pixel = (int(math.floor(debug_img.shape[1]/2.0)) + 
+			int(math.floor(debug_img.shape[1]/4.0)),
+                    int(math.floor(debug_img.shape[0]/2.0)))
 
+    # Overlay errors
+    errors_colour = (0,0,255)
+    cv2.putText(debug_img, "Delta_x: {}".format(curr_delta.dx), (10,h-10), 
+		font, size,errors_colour,1,cv2.LINE_AA) 
+    cv2.putText(debug_img, "Delta_y: {}".format(curr_delta.dy), (10,h-30), 
+		font, size,errors_colour,1,cv2.LINE_AA)
+    cv2.putText(debug_img, "Delta_theta: {}".format(curr_delta.dtheta*180/math.pi), (10,h-50), 
+		font, size,errors_colour,1,cv2.LINE_AA)
+
+    # Overlay manhattan distance error lines
+    cv2.line(debug_img, center_pixel, (center_pixel[0]+curr_delta.dx,
+	     center_pixel[1]),(0,0,255),1)
+    cv2.line(debug_img, (center_pixel[0]+curr_delta.dx,
+			 center_pixel[1]), (center_pixel[0]+curr_delta.dx,
+	     center_pixel[1]+curr_delta.dy),(0,0,255),1)
+
+    return debug_img
+
+class Delta(object):
+    def __init__(self, delta_x, delta_y, delta_theta, delta_theta_raw, is_mask_referenced):
+	# Store deltas
+	self.dx = delta_x
+	self.dy = delta_y
+	self.dtheta_raw = delta_theta_raw
+	self.dtheta = delta_theta
+	self.errors = (self.dx, self.dy, self.dtheta)
+
+	# Delta metadata
+	self.is_mask_referenced = is_mask_referenced
+	
 class Lander(object):
     def __init__(self, control_img):
         self._control_img = control_img
-        self._cmd_tracker = []
-        self._CMD_TRACKER_MAX_SIZE = 16
-        self._alpha_smoothing = 1.0
+	self._last_delta_buffer = []
+        self._delta_buffer = [] 
+	self._alpha = cfg["CONTROLLER"]["ALPHA"]
+        self._DELTA_BUFFER_MAX_SIZE = cfg["CONTROLLER"]["ERROR_HISTORY_BUFFER_SIZE"]
+	self._window_length = cfg["CONTROLLER"]["WINDOW_LENGTH"]
+	self._MAX_NO_LOCK_CYCLES = cfg["CONTROLLER"]["MAX_NO_LOCK_CYCLES"]
+	self.DNN_no_lock_counter = 0
+	self.DNN_locked = False
+
+    def reset_lock_counter(self):
+	self.DNN_locked = True
+	rospy.loginfo("DNN locked.")
+	self.DNN_no_lock_counter = 0
+
+    def increment_no_lock_counter(self):
+	self.DNN_no_lock_counter += 1
+	if self.DNN_no_lock_counter >= self._MAX_NO_LOCK_CYCLES:
+	    rospy.logwarn("DNN lock lost")
+	    self.DNN_locked = False
+	    self._delta_buffer = []
+
+    def _append_delta(self, curr_delta):	
+        if curr_delta.is_mask_referenced:
+	    self._last_delta_buffer = self._delta_buffer
+	    self._delta_buffer = []
+	    self._delta_buffer.append(curr_delta)
+        else:
+	    self._delta_buffer.append(curr_delta)
+	    assert(len(self._delta_buffer) <= self._DELTA_BUFFER_MAX_SIZE)
+
+    def _theta_correction(self, delta_theta):
+	if not self._last_delta_buffer:
+	    return delta_theta
+	
+	joined_delta_buffer = self._last_delta_buffer + self._delta_buffer
+	window = joined_delta_buffer[-self._window_length-1:-1]
+	window = [delta.dtheta_raw for delta in window]
+	
+	# Apply alpha trim filter to data
+	print("Window before filter: ", window)
+	window.sort()
+	delta_theta = np.mean(np.array(window[self._alpha:-self._alpha]))
+	print("Window after sort+cut: ", window[self._alpha:-self._alpha])
+	
+	return delta_theta
 
     @timer
-    def _compute_centroid(self, mask, keypoints=None):
-	if keypoints:
-	    kpt_img = np.zeros(mask.shape[-2:-1])
-	    points = np.array([(keypoint.pt[1],keypoint.pt[0]) for keypoint in keypoints], dtype=np.int)
-	    kpt_img[points] = 255 
-            M = cv2.moments(kpt_img)
-            x = int(M["m10"] / M["m00"])
-            y = int(M["m01"] / M["m00"])
-
+    def _compute_centroid(self, mask, keypoints=np.array([])):
+	if not keypoints.size == 0:
+	    keypoints = keypoints.astype(np.int)
+	    x = int(np.mean(keypoints[:,0]))
+	    y = int(np.mean(keypoints[:,1]))
 	else:
             M = cv2.moments(mask)
             x = int(M["m10"] / M["m00"])
@@ -55,138 +137,165 @@ class Lander(object):
         return (delta_x, delta_y)
 
     @timer
-    def _compute_rotation(self, img, rotated_img, max_features=500, good_match_percent=0.15, keypoints=None, descriptors=None):
+    def _compute_rotation(self, img, rotated_img, max_features=500, 
+			  good_match_percent=0.10, keypoints=None, 
+			  descriptors=np.array([])):
 
 	# Compute ORB on input images and find the corresponding features
         orb = cv2.ORB_create(max_features)
-        keypoints1, descriptors1 = orb.detectAndCompute(img, None)
-	if keypoints and not descriptors.size == 0:
-	    keypoints2, descriptors2 = keypoints, descriptors 	
+	if not keypoints and descriptors.size==0:
+            keypoints1, descriptors1 = orb.detectAndCompute(img, None)
 	else:
-            keypoints2, descriptors2 = orb.detectAndCompute(rotated_img, None)
-
+	    keypoints1, descriptors1 = keypoints, descriptors
+        keypoints2, descriptors2 = orb.detectAndCompute(rotated_img, None)
+	
         matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
-        matches = matcher.match(descriptors1, descriptors2, None)
-        matches.sort(key=lambda x: x.distance, reverse=False)
-        numGoodMatches = int(len(matches) * good_match_percent) # Only keep matches above good_match
-        matches = matches[:numGoodMatches]
+        try:
+	    matches = matcher.match(descriptors1, descriptors2, None)
+	except Exception as e:
+	    rospy.logwarn("CV2 ERROR! Skipping frame.")
+	    delta_theta = 0
+	    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+	    imMatches = np.concatenate((img, rotated_img), axis=1)
+	    H = np.zeros((3,3))	 
+            return delta_theta, imMatches, keypoints2, descriptors2, H
 
-        # Draw the matches on the img for visualization
-        imMatches = cv2.drawMatches(img, keypoints1, rotated_img, keypoints2, matches, None)
+	matches.sort(key=lambda x: x.distance, reverse=False)
+        num_good_matches = int(len(matches) * good_match_percent) 
+        matches = matches[:num_good_matches] # Only keep matches above good_match
 
-	cv2.namedWindow("test")
-	cv2.imshow("test",imMatches)
-	cv2.waitKey(23)
+	# Draw the matches on the img for visualization
+        imMatches = cv2.drawMatches(img, keypoints1, rotated_img,
+				    keypoints2, matches, None, matchColor=(0,255,0))
 
-        # Create the points list of only good points for homography matrix solving
-        points1 = np.zeros((len(matches), 2), dtype=np.float32)
+	# Create point correspondance lists
+	points1 = np.zeros((len(matches), 2), dtype=np.float32)
         points2 = np.zeros((len(matches), 2), dtype=np.float32)
         for i, match in enumerate(matches):
             points1[i, :] = keypoints1[match.queryIdx].pt
             points2[i, :] = keypoints2[match.trainIdx].pt
 
-        # Solve for the homography matrix and compute the theta_z euler angle from it
-        H, mask = cv2.findHomography(points1, points2, cv2.RANSAC)
+	# Find homography matrix based on good matches
+	try:
+            H, mask = cv2.findHomography(points1, points2, cv2.RANSAC, 5.0)
+	except Exception as e:
+	    H = np.zeros((3,3))	 
 
-        # Since homography matrix H is defined as [R1 R2 t], the rotation about the
-        # z axis can be computed with atan2(H12,H11)
-        delta_theta = math.atan2(H[1,0],H[0,0])
+	# Replace translation parameters with centroid values for later extraction
+	(x,y) = self._compute_centroid(img, points2)
+	try: 
+	    H[0,2] = x
+	    H[1,2] = y
+	except Exception as e:
+	    H = np.zeros((3,3))	 
+	    H[0,2] = x
+	    H[1,2] = y
+        
+	# Since homography matrix H is defined as [R1 R2 t], the rotation about the
+        # z axis can be computed with atan2(H12,H11)       
+	try:
+	    delta_theta = math.atan2(H[1,0],H[0,0])
+	except Exception as e:
+	    rospy.logwarn("Homography matrix emtpy.")
+	    delta_theta = 0
 
-        return -delta_theta, imMatches, keypoints2, descriptors2
+	# Invert the rotation to account for the horizontal flip of the camera
+        return -delta_theta, imMatches, keypoints2, descriptors2, H
 
     @timer
     def compute_control_mask(self, mask, mask_img):
 	rospy.loginfo("Computing control based on mask data.")
 
 	# Only consider images within the mask boundary 
-	mask_img[np.where(mask == 0)] = 0
+	mask_img[np.where(mask == 0)] = 125
 
         # Get center pixel of frame
         center_pixel = (int(math.floor(mask.shape[1]/2.0)),
                         int(math.floor(mask.shape[0]/2.0)))
 
-        centroid = self._compute_centroid(mask) # Compute centroid of detected mask
-
-        # Compute manhattan distance for delta_x and delta_y in PID control
+	# Compute centroid of detected mask
+        centroid = self._compute_centroid(mask) 
+        
+	# Compute manhattan distance for delta_x and delta_y in PID control
         delta_x, delta_y = self._manhattan_distance(center_pixel, centroid)
 
         # Compute the \delta theta for control
-        delta_theta, img_matches, keypoints, descriptors = self._compute_rotation(self._control_img, mask_img)
-        debug_img = img_matches
-
-        # Create error vector \delta_x \delta_y \delta_theta and compute
+        delta_theta_raw, img_matches, keypoints, descriptors, _ = self._compute_rotation(self._control_img, mask_img)
+       
+	delta_theta = self._theta_correction(delta_theta_raw)
+	debug_img = img_matches
+        
+	# Create error vector \delta_x \delta_y \delta_theta and compute
         # output
-        error = (delta_x, delta_y, delta_theta*180 / math.pi)
-        error_mag = math.sqrt(delta_x**2 + delta_y**2)
-        error_ang = math.atan2(delta_x, delta_y)
+	curr_delta = Delta(delta_x, delta_y,
+			   delta_theta, delta_theta_raw,
+			   is_mask_referenced=True)
 
-	rospy.logdebug("Errors: delta_x: {}, delta_y: {}, delta_theta: {}".format(error[0], error[1], error[2]))
+	log = "Errors: delta_x: {}, delta_y: {}, delta_theta: {}"
+	rospy.logdebug(log.format(curr_delta.dx, curr_delta.dy, curr_delta.dtheta*180/math.pi))
+        
+	# Return the errors plus the controller image visualization for debug	
+	debug_img = compose_debug_img(debug_img, curr_delta)
 
-
-        ############ Compute control from errors ##############################
-
-        #error_mag = self._controller.compute_output(error_mag)
-        linear_control_val = error_mag*math.cos(error_ang)
-        angular_control_val = error_mag*math.sin(error_ang)
-
-        # Do Exponential smoothing on linear and angular commands
-        if len(self._cmd_tracker) > 1:
-            linear_control_val = linear_control_val*(1-self._alpha_smoothing) + self._cmd_tracker[-1]*self._alpha_smoothing
-
-        # Append commands to buffer to use in future steps
-        """
-        if len(self._cmd_tracker) <= self._CMD_TRACKER_MAX_SIZE:
-            self._cmd_tracker.append((linear_control_val, angular_control_val, yaw_control_val,
-                    altitude_control_val, 0.0, 0.0))
-        else:
-            self._cmd_tracker = self._cmd_tracker[1:]
-            self._cmd_tracker.append((linear_control_val, angular_control_val, yaw_control_val,
-                    altitude_control_val, 0.0, 0.0))
-
-        """
-        # Return the command plus the controller image visualization for debug
-        #return (linear_control_val, angular_control_val, yaw_control_val,
-        #        altitude_control_val, 0.0, 0.0), debug_img
-
+	# Track errors sent as an internal state
+	self._append_delta(curr_delta)
+	
 	rospy.loginfo("Control headings determined successfully!")
-        cmd = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        return cmd, debug_img, keypoints, descriptors
+        return curr_delta, debug_img, keypoints, descriptors
     
     @timer
-    def compute_control_image(self, img, keypoints, descriptors):
+    def compute_control_image(self, img, mask, mask_img, keypoints, descriptors):
         rospy.loginfo("Computing control based on image to DNN mask correspondance.")
+	if not keypoints:
+	    pass
 	debug_img = img
 
-        # Get center pixel of frame
+	# Only consider areas of the image in the mask
+	mask_img[np.where(mask == 0)] = 0
+
+        # Compute the \delta theta for control
+        delta_theta, img_matches, keypoints, _, H = self._compute_rotation(mask_img, 
+									img,
+									keypoints=keypoints,
+									descriptors=descriptors)
+        
+	# Reference the relative theta to mask determined theta and window
+	delta_theta_raw = (delta_theta + (self._delta_buffer[0].errors[-1]))
+	delta_theta = self._theta_correction(delta_theta_raw)
+
+	debug_img = img_matches
+       
+	# Get center pixel of frame
         center_pixel = (int(math.floor(img.shape[1]/2.0)),
                         int(math.floor(img.shape[0]/2.0)))
 
 	# Compute centroid of detected mask
-        centroid = self._compute_centroid(img, keypoints=keypoints)
+        centroid = (int(H[0,2]), int(H[1,2]))
 
         # Compute manhattan distance for delta_x and delta_y in PID control
         delta_x, delta_y = self._manhattan_distance(center_pixel, centroid)
 
-        # Compute the \delta theta for control
-        delta_theta, img_matches, keypoints, descriptors = self._compute_rotation(self._control_img, img)
-        debug_img = img_matches
-
         # Create error vector \delta_x \delta_y \delta_theta and compute
         # output
-        error = (delta_x, delta_y, delta_theta*180 / math.pi)
-        error_mag = math.sqrt(delta_x**2 + delta_y**2)
-        error_ang = math.atan2(delta_x, delta_y)
+	curr_delta = Delta(delta_x, delta_y,
+			   delta_theta, delta_theta_raw,
+			   is_mask_referenced=False)
 
-	rospy.logdebug("Errors: delta_x: {}, delta_y: {}, delta_theta: {}".format(error[0], error[1], error[2]))
+	log = "Errors: delta_x: {}, delta_y: {}, delta_theta: {}"
+	rospy.logdebug(log.format(curr_delta.dx, curr_delta.dy, curr_delta.dtheta*180/math.pi))
 
+	if not self.DNN_locked:
+	    curr_delta = Delta(0.0, 0.0, 0.0, is_mask_referenced=False)
+	    rospy.logwarn("DNN lock lost...")
+	    return curr_delta, debug_img
 
-        ############ Compute control from errors ##############################
+	debug_img = compose_debug_img(debug_img, curr_delta)
 
-        linear_control_val = error_mag*math.cos(error_ang)
-        angular_control_val = error_mag*math.sin(error_ang)
+	# Track commands sent as an internal state
+	self._append_delta(curr_delta)
 
-	cmd = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-	return cmd, debug_img	
+	rospy.loginfo("Control headings determined successfully!")
+        return curr_delta, debug_img
 
 
 class Data_Handler(object):
@@ -251,7 +360,7 @@ class Data_Handler(object):
         """
         cmd: (6,) element array where the first three elements correspond to the
              formatted as linear_control_val and angular_control_val
-        """
+	"""
         # Set up image message
         msg = Image()
         msg.header.stamp.secs = input_msg.header.stamp.secs
@@ -269,11 +378,6 @@ class Data_Handler(object):
         msg.data = struct.pack('ffffff', cmd[0,0,0], cmd[0,0,1], cmd[0,0,2],
                                          cmd[0,0,3], cmd[0,0,4], cmd[0,0,5])
 
-        #print(msg)
-        # Test that the input looks like the output
-        #data = bytearray(list(msg.data))
-        #print(struct.unpack('<%df' % (len(data) / 4), data))
-
     def publish_debug_visuals(self, debug_img):
         debug_img_msg = self._bridge.cv2_to_imgmsg(debug_img, "bgr8")
         self._debug_vis_topic_pub.publish(debug_img_msg)
@@ -289,23 +393,23 @@ def main():
     dh = Data_Handler()
 
     # Create landing controller
-    # Initialize with a control binary mask from the COCO dataset. Use for
-    # reference in control. One bmp image should exist in control_img dir
-    img_path = os.path.join(os.getcwd(), 'src/lndng_controller/src/control_img/elephant.png')
+    # Setup control image
+    img_path = os.path.join(os.getcwd(), cfg["CNTL_IMG_PATH"])
     img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-    ret, img_mask = cv2.threshold(img[:,:,3],0,255,cv2.THRESH_BINARY)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    for i in range(img.shape[0]):
-        for j in range(img.shape[1]):
-            if not img_mask[i,j] == 255:
-                img[i,j] = 0
-
-    img = cv2.resize(img, (640,480), interpolation= cv2.INTER_CUBIC)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)	
+    (x,y) = cfg["CAMERA_DIMS"][0], cfg["CAMERA_DIMS"][1]
+    img = cv2.resize(img, (x,y), interpolation= cv2.INTER_CUBIC)
     control_img = img
     lc = Lander(control_img)
+	
+    # Create directory to store the logs
+    os.mkdir(LOGDIR_PATH)
 
     # Spin up landing controller
-    rospy.init_node('landing_controller', log_level=rospy.DEBUG)
+    if cfg["VERBOSITY"] == "DEBUG":
+    	rospy.init_node('landing_controller', log_level=rospy.DEBUG)
+    else:
+	rospy.init_node('landing_conrtoller')
     rospy.loginfo("Starting Landing_Controller node...")
 
     # Subscribe to mask rcnn mask stream
@@ -325,27 +429,56 @@ def main():
     #                                   queue_size=20))
 
     # Publish to visualizer topic
-    dh.set_debug_visualizer_pub(rospy.Publisher('/radius/landing_controller/visualization', Image, queue_size=20))
-
-    rate = rospy.Rate(4) # 250ms Waypoint commands must be faster than 2Hz
+    dh.set_debug_visualizer_pub(rospy.Publisher('/radius/landing_controller/visualization',
+						Image, queue_size=20))
+   
+    # Waypoint commands must be faster than 2Hz
+    rate = rospy.Rate(cfg["CONTROLLER"]["UPDATE_FREQ"])    
     keypoints = descriptors = None
+    mask = None
+    mask_img = None
     while not rospy.is_shutdown():
         if dh.mask_available and dh.mask_image_available:
-            ctrl_cmd, debug_img, keypoints, descriptors = lc.compute_control_mask(dh.data.mask, dh.data.mask_image)
+	    lc.reset_lock_counter()
+	    mask = dh.data.mask
+	    mask_img = dh.data.mask_image
+            curr_delta, debug_img, keypoints, descriptors = lc.compute_control_mask(mask, mask_img)
+
+	    # Publish errors and save debug logs
+	    cv2.imwrite(os.path.join(LOGDIR_PATH,"{}.png".format(time.time())),debug_img)
+	    if cfg["VERBOSITY"] == "DEBUG":
+	        cv2.imshow("Debug image", debug_img)
+ 	        cv2.waitKey(23)	
+
+	    # TODO: change publishing to publish errors 
 	    #dh.publish_command(ctrl_cmd, dh.data.raw)
             dh.publish_debug_visuals(debug_img)
             dh.mask_available = False
 	    dh.mask_image_available = False
 
-	elif dh.image_available:
+	elif not lc.DNN_locked:
+	    keypoints = None 
+	    dh.mask_image_available = False
+
+	elif dh.image_available and lc.DNN_locked: 
 	    if dh.mask_image_available:
-	    	dh.mask_image_available = False
-	    
-	    if not keypoints == None:
-	    	ctrl_cmd, debug_img = lc.compute_control_image(dh.data.raw, keypoints, descriptors)
+		lc.increment_no_lock_counter()
+	    	dh.mask_image_available = False 
+
+	    if not keypoints == None and lc.DNN_locked:
+		raw = dh.data.raw
+	    	curr_delta, debug_img = lc.compute_control_image(raw, mask, mask_img,
+							        keypoints, descriptors)	
+		# Publish commands and save debug logs
+	    	cv2.imwrite(os.path.join(LOGDIR_PATH,"{}.png".format(time.time())),debug_img)
+	    	if cfg["VERBOSITY"] == "DEBUG":
+	            cv2.imshow("Debug image", debug_img)
+ 	            cv2.waitKey(23)	
+
 		dh.publish_debug_visuals(debug_img)
-		#dh.publish_command(ctrl_cmd, dh.data.raw)
-	   
+		# TODO: change to publish errors
+		#dh.publish_command(ctrl_cmd, dh.data.raw) 
+
 	    dh.image_available = False
 
         rate.sleep()

@@ -1,0 +1,22 @@
+CONTROLLER:
+    # THETA WINDOWING
+    # atan2 outlier correction using alpha trimmed filter
+    WINDOW_LENGTH: 8
+    ALPHA: 2
+
+    # LOCK SETTINGS
+    # Num inferences without finding base station
+    MAX_NO_LOCK_CYCLES: 2
+    ERROR_HISTORY_BUFFER_SIZE: 36 # 4Hz * 3s/inference * MAX_NO_LOCK_CYCLES
+
+    # Publish rate to respective ros topics
+    # MAVROS REQUIRE A MIN UPDATE FREQ OF 2Hz
+    UPDATE_FREQ: 4
+
+# GENERAL
+LOGDIR: "/home/nvidia/radius/ros/scripts/logs"
+CNTL_IMG_PATH: "src/lndng_controller/src/control_img/calibrated_elephant.png"
+VERBOSITY: "DEBUG"
+CAMERA_DIMS: 
+    - 640 # Width (x)
+    - 480 # Height (y)

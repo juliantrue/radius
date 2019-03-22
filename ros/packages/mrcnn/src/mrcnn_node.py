@@ -10,12 +10,14 @@ import sys, os, time
 from multiprocessing import Lock
 import numpy as np
 import cv2
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 # Mask RCNN stuff
 sys.path.append('./mrcnn')
 from mrcnn.config import Config
 from mrcnn.visualize import display_instances
 from mrcnn import model as modellib
+
 
 
 class CocoConfig(Config):
@@ -42,7 +44,7 @@ class InferenceConfig(CocoConfig):
     # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
     GPU_COUNT = 1
     IMAGES_PER_GPU = 1
-    DETECTION_MIN_CONFIDENCE = 0
+    DETECTION_MIN_CONFIDENCE = 0.9950
     """
     class_names = ['BG', 'person', 'bicycle', 'car', 'motorcycle', 'airplane',
                'bus', 'train', 'truck', 'boat', 'traffic light',
@@ -84,9 +86,7 @@ class Mask_RCNN(modellib.MaskRCNN):
             if(self._class_names.index(self.only_class) in r['class_ids']):
                 idx = np.where(r['class_ids'] == self._class_names.index(self.only_class))[0]
 
-                print(idx, np.array(r['rois'][idx,:]).shape,
-                      np.array(r['masks'][:,:,idx]).shape,
-                      np.array(r['class_ids'][idx]).shape)
+		print(r['scores'][idx])
 
                 mask, masked_img = display_instances(img,
                                                      np.array(r['rois'][idx,:]),
@@ -154,9 +154,11 @@ def main():
     # Only look for one class to avoid issues with controller node
     model = Mask_RCNN(mode='inference', config=RedtailConfig,
                       model_dir='./model', class_name='elephant')
-    print("Loading weights ", model_path)
+    print("Loading weights {}".format(model_path))
     model.load_weights(model_path, by_name=True)
-    rospy.init_node('Mask_RCNN')
+
+
+    rospy.init_node('Mask_RCNN', log_level=rospy.DEBUG)
     rospy.loginfo("Starting Mask_RCNN node...")
 
     # Subscribe to camera input topic

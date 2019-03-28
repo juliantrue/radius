@@ -68,39 +68,48 @@ class Mask_RCNN(modellib.MaskRCNN):
     # Thread safe ros implementation of the Mask RCNN architecture
     # implementation by matterport in Keras
     # Finds only one class as per our application
-    def __init__(self, mode, config, model_dir, class_name):
-        self.only_class = class_name
-        self._mutex = Lock()
-        self._class_names = config.class_names
-        super(Mask_RCNN, self).__init__(mode, config, model_dir)
+	def __init__(self, mode, config, model_dir, class_name):
+		self.only_class = class_name
+		self._mutex = Lock()
+		self._class_names = config.class_names
+		super(Mask_RCNN, self).__init__(mode, config, model_dir)
+	
+	def preprocess(self, img):
+		
 
-    def compute_masks(self, img):
-        rospy.loginfo("Computing detections.")
-        with self._mutex:
-            start = time.time()
-            results = self.detect([img], verbose=0)
-            end = time.time()
-            rospy.loginfo("Inferences computed in: {:.2f}ms".format((end-start)*10**3))
-            r = results[0]
-            # Extract specified class
-            if(self._class_names.index(self.only_class) in r['class_ids']):
-                idx = np.where(r['class_ids'] == self._class_names.index(self.only_class))[0]
 
-		print(r['scores'][idx])
 
-                mask, masked_img = display_instances(img,
+
+	
+		return img
+
+
+
+	def compute_masks(self, img):
+		rospy.loginfo("Computing detections.")
+		with self._mutex:
+			start = time.time()
+			results = self.detect([img], verbose=0)
+			end = time.time()
+			rospy.loginfo("Inferences computed in: {:.2f}ms".format((end-start)*10**3))
+			r = results[0]
+			# Extract specified class
+			if(self._class_names.index(self.only_class) in r['class_ids']):
+				idx = np.where(r['class_ids'] == self._class_names.index(self.only_class))[0]
+				print(r['scores'][idx])
+				mask, masked_img = display_instances(img,
                                                      np.array(r['rois'][idx,:]),
                                                      np.array(r['masks'][:,:,idx]),
                                                      np.array(r['class_ids'][idx]),
                                                      self._class_names,
                                                      np.array(r['scores'][idx]))
-            else:
-                rospy.logwarn('No instances detected. Passing raw image, no mask.')
-                masked_img = img
-                mask = np.zeros(img.shape, dtype=np.uint8)
-                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+			else:
+				rospy.logwarn('No instances detected. Passing raw image, no mask.')
+				masked_img = img
+				mask = np.zeros(img.shape, dtype=np.uint8)
+				mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
 
-        return mask, masked_img
+		return mask, masked_img
 
 class Data_Handler(object):
     def __init__(self):
@@ -137,47 +146,48 @@ class Data_Handler(object):
 
 def main():
     #TODO: Elevate these to arguments
-    root_dir = os.getcwd()
+	root_dir = os.getcwd()
     #model_path = os.path.join(root_dir, "src/mrcnn/src/model/mask_rcnn_coco.h5" 
-    model_path = os.path.join(root_dir, "src/mrcnn/src/model/mask_rcnn_radius.h5")
+	model_path = os.path.join(root_dir, "src/mrcnn/src/model/mask_rcnn_radius.h5")
 
 
     # Setup config for inferencing
-    RedtailConfig = InferenceConfig()
-    RedtailConfig.display()
+	RedtailConfig = InferenceConfig()
+	RedtailConfig.display()
 
     # Create data handler object to prevent storing as internal state
-    dh = Data_Handler()
+	dh = Data_Handler()
 
     # Initialize the model to inference on COCO data
     # Initialize model and load weights prior to spinning up node
     # Only look for one class to avoid issues with controller node
-    model = Mask_RCNN(mode='inference', config=RedtailConfig,
-                      model_dir='./model', class_name='elephant')
-    print("Loading weights {}".format(model_path))
-    model.load_weights(model_path, by_name=True)
+	model = Mask_RCNN(mode='inference', config=RedtailConfig,
+					  model_dir='./model', class_name='elephant')
+	print("Loading weights {}".format(model_path))
+	model.load_weights(model_path, by_name=True)
 
 
-    rospy.init_node('Mask_RCNN', log_level=rospy.DEBUG)
-    rospy.loginfo("Starting Mask_RCNN node...")
+	rospy.init_node('Mask_RCNN', log_level=rospy.DEBUG)
+	rospy.loginfo("Starting Mask_RCNN node...")
 
-    # Subscribe to camera input topic
-    rospy.Subscriber("camera/image_raw", Image, dh.on_img)
-    rospy.loginfo("Listening on camera/image_raw")
+	# Subscribe to camera input topic
+	rospy.Subscriber("camera/image_raw", Image, dh.on_img)
+	rospy.loginfo("Listening on camera/image_raw")
 
-    # Publish to relevent topics
-    dh.set_mask_pub(rospy.Publisher('radius/mask_rcnn/mask', Image, queue_size=20))
-    dh.set_img_mask_pub(rospy.Publisher('radius/mask_rcnn/img_mask', Image, queue_size=5))
+	# Publish to relevent topics
+	dh.set_mask_pub(rospy.Publisher('radius/mask_rcnn/mask', Image, queue_size=20))
+	dh.set_img_mask_pub(rospy.Publisher('radius/mask_rcnn/img_mask', Image, queue_size=5))
 
-    rate = rospy.Rate(2)
-    while not rospy.is_shutdown():
-        if(dh.data_available):
-            rospy.loginfo("Preparing for processing")
-            mask, masked_img = model.compute_masks(dh.data)
-            dh.publish_img_mask(masked_img)
-            dh.publish_mask(mask)
-            dh.data_available = False
-        rate.sleep()
+	rate = rospy.Rate(2)
+	while not rospy.is_shutdown():
+		if(dh.data_available):
+			rospy.loginfo("Preparing for processing")
+			img = model.preprocess(dh.data)
+			mask, masked_img = model.compute_masks(img)
+			dh.publish_img_mask(masked_img)
+			dh.publish_mask(mask)
+			dh.data_available = False
+		rate.sleep()
 
 if __name__ == "__main__":
     try:

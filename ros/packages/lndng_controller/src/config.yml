@@ -1,8 +1,11 @@
+# CONTROLLER HYPERPARAMETERS
 CONTROLLER:
     # THETA WINDOWING
     # atan2 outlier correction using alpha trimmed filter
-    WINDOW_LENGTH: 8
-    ALPHA: 2
+    TRANSLATION_WINDOW_LENGTH: 8
+    THETA_WINDOW_LENGTH: 8
+    TRANSLATION_ALPHA: 2
+    THETA_ALPHA: 3
 
     # LOCK SETTINGS
     # Num inferences without finding base station
@@ -13,9 +16,15 @@ CONTROLLER:
     # MAVROS REQUIRE A MIN UPDATE FREQ OF 2Hz
     UPDATE_FREQ: 4
 
+# LANDING PAD
+# Real world height and width of landing image
+# Measured in meters
+KIMG_WIDTH: 0.279
+KIMG_HEIGHT: 0.216
+CNTL_IMG_PATH: "src/lndng_controller/src/control_img/calibrated_elephant.png"
+
 # GENERAL
 LOGDIR: "/home/nvidia/radius/ros/scripts/logs"
-CNTL_IMG_PATH: "src/lndng_controller/src/control_img/calibrated_elephant.png"
 VERBOSITY: "DEBUG"
 CAMERA_DIMS: 
     - 640 # Width (x)

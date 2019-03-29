@@ -7,11 +7,12 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 # Python libs
 import sys, os, datetime, time, struct, math
-import yaml
 from multiprocessing import Lock
+import yaml
 import numpy as np
-from scipy.spatial import distance as dist
 import cv2
+import remotecv
+from scipy.spatial import distance as dist
 
 
 # Parse config file
@@ -33,16 +34,26 @@ def timer(func):
 		return value
 	return wrapper_timer
 
-def compose_debug_img(debug_img, curr_delta):
-	size = 0.5
+def compose_debug_img(debug_img, curr_delta, img=np.array([])):
 	font = cv2.FONT_HERSHEY_SIMPLEX
+
+	if not img.size == 0:
+		h,w,_ = img.shape
+		zrs = np.zeros((480,640,3),dtype=np.uint8)	
+		cv2.putText(zrs, "NO LOCK", (10,h-100), 
+				font, 3,(0,255,0),1,cv2.LINE_AA)
+		img = np.concatenate((zrs,img), axis=1)
+		debug_img = img
+		return debug_img
+
+	size = 0.5
 	h,w,_ = debug_img.shape
 	center_pixel = (int(math.floor(debug_img.shape[1]/2.0)) + 
 					int(math.floor(debug_img.shape[1]/4.0)),
 					int(math.floor(debug_img.shape[0]/2.0)))
 
 	# Overlay errors in text
-	errors_colour = (0,0,255)
+	errors_colour = (255,0,0)
 	cv2.putText(debug_img, "Delta_x_real: {}".format(curr_delta.dx_real), (10,h-10), 
 				font, size,errors_colour,1,cv2.LINE_AA)
 	cv2.putText(debug_img, "Delta_y_real: {}".format(curr_delta.dy_real), (10,h-30), 
@@ -292,13 +303,19 @@ class Lander(object):
 			temp = dx
 			dx = dy
 			dy = temp
-			
-		x_factor = kimg_width / dx
-		y_factor = kimg_height / dy
-		self._x_scale_factor = x_factor
-		self._y_scale_factor = y_factor
+		
+		try:	
+			x_factor = kimg_width / dx 
+			y_factor = kimg_height / dy
+			self._x_scale_factor = x_factor
+			self._y_scale_factor = y_factor
+		except ZeroDivisionError:
+			# If zero div error pops up, lower the scale to lessen
+			# translation
+			self._x_scale_factor = 0.5*self._x_scale_factor
+			self._y_scale_factor = 0.5*self._y_scale_factor
 	
-		return x_factor, y_factor
+		return self._x_scale_factor, self._y_scale_factor
 
 	@timer
 	def _compute_centroid(self, mask, keypoints=np.array([])):
@@ -339,6 +356,7 @@ class Lander(object):
 			rospy.logwarn("CV2 ERROR! Skipping frame.")
 			delta_theta = 0
 			img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+			rotated_img = np.zeros((480,640), dtype=np.uint8)
 			rotated_img = cv2.cvtColor(rotated_img, cv2.COLOR_GRAY2BGR)
 			imMatches = np.concatenate((img, rotated_img), axis=1)
 			H = np.zeros((3,3))	 
@@ -560,7 +578,6 @@ class Data_Handler(object):
 			print(e)
 
 		if not self.image_available:
-			rospy.logdebug("Received raw image on camera/raw")
 			self.data.raw = cv_image
 			self.image_available = True
 
@@ -595,6 +612,9 @@ def main():
 	
 	# Create directory to store the logs
 	os.mkdir(LOGDIR_PATH)
+
+	# Intialize UDP streaming for debug image output
+	remotecv.initialize('10.42.0.97', 5800, w=1280)
 
 	# Spin up landing controller
 	if cfg["VERBOSITY"] == "DEBUG":
@@ -644,8 +664,8 @@ def main():
 			frame_counter += 1
 			if cfg["VERBOSITY"] == "DEBUG":	
 				rospy.logdebug("Frame {}".format(frame_counter))
-				cv2.imshow("Debug image", debug_img)
-				cv2.waitKey(23)
+				remotecv.imshow("Debug image", debug_img)
+				remotecv.waitKey(23)
 
 			dh.publish_deltas(curr_delta)
 			dh.publish_debug_visuals(debug_img)
@@ -654,7 +674,11 @@ def main():
 
 		elif not lc.DNN_locked:
 			keypoints = None 
-			dh.mask_image_available = False
+			if dh.image_available:
+				debug_img = compose_debug_img(None, None, img=dh.data.raw)
+				remotecv.imshow("Debug image", debug_img)
+				remotecv.waitKey(23)
+			dh.image_available = False
 
 		elif dh.image_available and lc.DNN_locked: 
 			if dh.mask_image_available:
@@ -673,8 +697,8 @@ def main():
 				frame_counter += 1
 				if cfg["VERBOSITY"] == "DEBUG":
 					rospy.logdebug("Frame {}".format(frame_counter))
-					cv2.imshow("Debug image", debug_img)
-					cv2.waitKey(23)	
+					remotecv.imshow("Debug image", debug_img)
+					remotecv.waitKey(23)	
 
 			dh.publish_debug_visuals(debug_img)
 			dh.publish_deltas(curr_delta) 

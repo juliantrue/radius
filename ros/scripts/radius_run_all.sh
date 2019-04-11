@@ -1,4 +1,3 @@
-xterm -e watch -n 0.5 sensors &
 ./run_MAVROS.sh > /dev/null &
 ./run_gscam.sh > /dev/null &
 ./run_mrcnn.sh &

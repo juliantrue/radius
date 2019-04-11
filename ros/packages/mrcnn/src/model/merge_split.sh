@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 FILE_NAME=$1
 if [ -z "${FILE_NAME}" ]; then

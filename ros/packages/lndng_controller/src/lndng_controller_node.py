@@ -36,24 +36,43 @@ def timer(func):
 
 def compose_debug_img(debug_img, curr_delta, img=np.array([])):
 	font = cv2.FONT_HERSHEY_SIMPLEX
-
+	cntl_colour = (255,255,255)
+	errors_colour = (255,0,0)
+	size = 0.5
+		
 	if not img.size == 0:
-		h,w,_ = img.shape
-		zrs = np.zeros((480,640,3),dtype=np.uint8)	
-		cv2.putText(zrs, "NO LOCK", (10,h-100), 
-				font, 3,(0,255,0),1,cv2.LINE_AA)
+		h,w,channels = img.shape
+		zrs = np.zeros((h,640,3),dtype=np.uint8)	
 		img = np.concatenate((zrs,img), axis=1)
+		img = np.concatenate((img, np.zeros((200,w*2,channels), dtype=np.uint8)), axis=0)
+		h += 200
+		cv2.putText(img, "NO LOCK", (10,h-100), 
+				font, 3,(0,255,0),1,cv2.LINE_AA)
+
+		lin_w_bounds = (660, 960)
+		ang_w_bounds = (980, 1260)	
+		lin_center = (int((lin_w_bounds[0] + lin_w_bounds[1]) / 2), h-100)
+		ang_center = (int((ang_w_bounds[0] + ang_w_bounds[1]) / 2), h-100)
+
+		# Controls
+		cv2.putText(img, "Linear Controls:", (lin_w_bounds[0],h-170), 
+				font, 1, cntl_colour, 1, cv2.LINE_AA)
+
+		cv2.putText(img, "Angular Control:", (ang_w_bounds[0],h-170), 
+				font, 1, cntl_colour, 1, cv2.LINE_AA)
 		debug_img = img
 		return debug_img
 
-	size = 0.5
-	h,w,_ = debug_img.shape
+	h,w,channels = debug_img.shape
+	h += 200
 	center_pixel = (int(math.floor(debug_img.shape[1]/2.0)) + 
 					int(math.floor(debug_img.shape[1]/4.0)),
 					int(math.floor(debug_img.shape[0]/2.0)))
 
+	# Add black area at the bottom to visualize errors
+	debug_img = np.concatenate((debug_img, np.zeros((200,w,channels), dtype=np.uint8)), axis=0)
+	
 	# Overlay errors in text
-	errors_colour = (255,0,0)
 	cv2.putText(debug_img, "Delta_x_real: {}".format(curr_delta.dx_real), (10,h-10), 
 				font, size,errors_colour,1,cv2.LINE_AA)
 	cv2.putText(debug_img, "Delta_y_real: {}".format(curr_delta.dy_real), (10,h-30), 
@@ -73,6 +92,40 @@ def compose_debug_img(debug_img, curr_delta, img=np.array([])):
 			 center_pixel[1]), (center_pixel[0]+curr_delta.dx,
 			 center_pixel[1]+curr_delta.dy),(0,0,255),1)
 
+	# Setup the centers and bounds for the display
+	lin_w_bounds = (660, 960)
+	ang_w_bounds = (980, 1260)	
+	lin_center = (int((lin_w_bounds[0] + lin_w_bounds[1]) / 2), h-100)
+	ang_center = (int((ang_w_bounds[0] + ang_w_bounds[1]) / 2), h-100)
+
+	# Linear controls
+	norm_x = int((curr_delta.dx / 640)*(lin_w_bounds[1] - lin_w_bounds[0]))
+	norm_y = int((curr_delta.dy / 480)*(200))	
+	cv2.putText(debug_img, "Linear Controls:", (lin_w_bounds[0],h-170), 
+				font, size, cntl_colour,1,cv2.LINE_AA)
+	if not curr_delta.dx_real == 0.0:
+		cv2.arrowedLine(debug_img, lin_center, (lin_center[0]+norm_x, lin_center[1]), cntl_colour, 3)
+		cv2.arrowedLine(debug_img, lin_center, (lin_center[0], lin_center[1]+norm_y), cntl_colour, 3)
+	
+	# Angular controls
+	radius = int((ang_w_bounds[1] - ang_w_bounds[0]) / 4)
+	axes = (radius, radius)
+	angle = 0
+	start_angle = 0
+	end_angle = 0.8*curr_delta.dtheta*180/math.pi
+	cv2.ellipse(debug_img, ang_center, axes, angle, start_angle, end_angle, cntl_colour, 3)
+	cv2.putText(debug_img, "Angular Control:", (ang_w_bounds[0],h-170), 
+				font, size, cntl_colour,1,cv2.LINE_AA)
+	if curr_delta.dtheta <= 0:
+		cv2.line(debug_img, (ang_center[0]+radius, ang_center[1]),(ang_center[0]+radius-5, 
+			ang_center[1]-5), cntl_colour,3)
+		cv2.line(debug_img, (ang_center[0]+radius, ang_center[1]),(ang_center[0]+radius+5, 
+			ang_center[1]-5), cntl_colour,3)
+	else: 
+		cv2.line(debug_img, (ang_center[0]+radius, ang_center[1]),(ang_center[0]+radius-5, 
+			ang_center[1]+5), cntl_colour,3)
+		cv2.line(debug_img, (ang_center[0]+radius, ang_center[1]),(ang_center[0]+radius+5, 
+			ang_center[1]+5), cntl_colour,3)
 	return debug_img
 
 def order_points(pts):
@@ -614,7 +667,7 @@ def main():
 	os.mkdir(LOGDIR_PATH)
 
 	# Intialize UDP streaming for debug image output
-	remotecv.initialize('10.42.0.97', 5800, w=1280)
+	remotecv.initialize('10.42.0.97', 5800, w=2*x, h=y+200)
 
 	# Spin up landing controller
 	if cfg["VERBOSITY"] == "DEBUG":
@@ -658,9 +711,7 @@ def main():
 
 			# Publish errors and save debug logs
 			cv2.imwrite(os.path.join(LOGDIR_PATH,"{}_{}.jpeg".format(frame_counter,
-																	time.time())),
-																	debug_img,
-													[int(cv2.IMWRITE_JPEG_QUALITY),80])
+				time.time())),debug_img, [int(cv2.IMWRITE_JPEG_QUALITY),80])
 			frame_counter += 1
 			if cfg["VERBOSITY"] == "DEBUG":	
 				rospy.logdebug("Frame {}".format(frame_counter))
@@ -671,15 +722,16 @@ def main():
 			dh.publish_debug_visuals(debug_img)
 			dh.mask_available = False
 			dh.mask_image_available = False
-
-		elif not lc.DNN_locked:
+		
+		if not lc.DNN_locked:
 			keypoints = None 
 			if dh.image_available:
 				debug_img = compose_debug_img(None, None, img=dh.data.raw)
 				remotecv.imshow("Debug image", debug_img)
 				remotecv.waitKey(23)
 			dh.image_available = False
-
+			dh.mask_image_available = False
+		
 		elif dh.image_available and lc.DNN_locked: 
 			if dh.mask_image_available:
 				lc.increment_no_lock_counter()
@@ -691,9 +743,7 @@ def main():
 									keypoints, descriptors)	
 				# Publish commands and save debug logs
 				cv2.imwrite(os.path.join(LOGDIR_PATH,"{}_{}.jpeg".format(frame_counter,
-																		time.time())),
-																		debug_img,
-												[int(cv2.IMWRITE_JPEG_QUALITY),80])
+						time.time())), debug_img, [int(cv2.IMWRITE_JPEG_QUALITY),80])
 				frame_counter += 1
 				if cfg["VERBOSITY"] == "DEBUG":
 					rospy.logdebug("Frame {}".format(frame_counter))
@@ -703,7 +753,7 @@ def main():
 			dh.publish_debug_visuals(debug_img)
 			dh.publish_deltas(curr_delta) 
 			dh.image_available = False
-
+	
 		rate.sleep()
 
 if __name__ == "__main__":

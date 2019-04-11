@@ -1,0 +1,2 @@
+ros/scripts/logs/*
+ros/packages/mrcnn/src/model/*.h5
